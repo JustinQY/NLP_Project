@@ -1,4 +1,5 @@
 import re
+import torch
 import random
 from huggingface_hub import login
 from google.colab import userdata
@@ -89,7 +90,7 @@ def custom_trainer(model, dataset, tokenizer, lr=2e-4, warmup=0.03, L2=0.05, bat
         gradient_accumulation_steps=8,
         num_train_epochs=3,
         # load_best_model_at_end=True,
-        logging_steps=20,
+        logging_steps=100,
         logging_strategy="steps",
         fp16=True,
         # optim="paged_adamw_8bit",
@@ -146,7 +147,8 @@ def generate_prompt(characters, location="Central Perk", scenario="having coffee
     return prompt.strip()
 
 
-def generate_script(prompt, max_new_tokens=500, temperature=0.9, top_k=50, top_p=0.95):
+def generate_script(model, tokenizer, prompt, max_new_tokens=500, temperature=0.9, top_k=50, top_p=0.95):
+    model.eval()
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
 
     with torch.no_grad():
