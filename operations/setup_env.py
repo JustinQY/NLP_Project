@@ -12,7 +12,9 @@ def install(package):
 
 def main():
     install("datasets")
-    install("bitsandbytes -U")
+    install("evaluate")
+    install("rouge_score")
+    install("bitsandbytes")
 
 if __name__ == "__main__":
     main()
