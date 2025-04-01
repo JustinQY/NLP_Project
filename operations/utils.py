@@ -7,8 +7,8 @@ from datasets import Dataset
 from huggingface_hub import login
 from google.colab import userdata
 from sklearn.model_selection import train_test_split
-from peft import get_peft_model, LoraConfig, TaskType
-from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer, BitsAndBytesConfig
+from peft import get_peft_model, LoraConfig, TaskType, PeftModel, PeftConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer, BitsAndBytesConfig, EarlyStoppingCallback
 
 gpt2 = "gpt2-xl"
 llama_2_7 = "meta-llama/Llama-2-7b-hf"
@@ -42,8 +42,14 @@ class DataPreprocessor:
         self.tokenizer_name = tokenizer_name
         self.tokenizer = self.create_tokenizer()
 
-    @staticmethod
-    def clean_script(script):
+
+    def create_tokenizer(self):
+        print(f"Select {self.tokenizer_name} for Tokenization...\n")
+        tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+        tokenizer.pad_token = tokenizer.eos_token
+        return tokenizer
+
+    def clean_script(self, script):
         lines = script.splitlines()
         cleaned_lines = []
 
@@ -53,27 +59,38 @@ class DataPreprocessor:
                 continue
             if line.startswith("Written by") or line.startswith("Transcribed by"):
                 continue
-            if line.startswith("[Scene"):
+            if line.startswith("[") or line.startswith("("):
                 cleaned_lines.append(line)
             elif ':' in line:
                 cleaned_lines.append(line)
             elif line.isupper() and len(line.split()) > 2:
                 cleaned_lines.insert(0, line)
-
+        
+        cleaned_lines.append("[End of episode]")
+        eos_token = self.tokenizer.eos_token or "<eos>"
+        cleaned_lines.append(eos_token)
+        
         return "\n".join(cleaned_lines)
     
+
     def data_split(self, df):
         train_scripts_df, val_scripts_df = train_test_split(df, test_size=0.1, random_state=42)
         train_scripts = train_scripts_df.tolist()
         val_scripts = val_scripts_df.tolist()
         return train_scripts, val_scripts
-
-    def create_tokenizer(self):
-        print(f"Select {self.tokenizer_name} for Tokenization...\n")
-        tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
-        tokenizer.pad_token = tokenizer.eos_token
-        return tokenizer
     
+
+    def tokenize_scripts(self, train_scripts, val_scripts):
+        print("Tokenizing [training] scripts...\n")
+        train_tokens, train_dataset = self.chunk_scripts(train_scripts)
+        print("Tokenizing [validation] scripts...\n")
+        val_tokens, val_dataset = self.chunk_scripts(val_scripts)
+        print("\nTokenizations all done!")
+        self.train_set = train_dataset
+        self.val_set = val_dataset
+        return train_tokens, val_tokens, train_dataset, val_dataset
+
+
     # Script Chunker By 1024 Length
     def chunk_scripts(self, scripts, max_len=1024, stride=512):
         print("\nScripts Received! \n\nBegin to chunk scripts into pieces length less than 1024...\n")
@@ -100,16 +117,6 @@ class DataPreprocessor:
             "attention_mask": attention_masks,
             "labels": labels
         })
-
-    def tokenize_scripts(self, train_scripts, val_scripts):
-        print("Tokenizing [training] scripts...\n")
-        train_tokens, train_dataset = self.chunk_scripts(train_scripts)
-        print("Tokenizing [validation] scripts...\n")
-        val_tokens, val_dataset = self.chunk_scripts(val_scripts)
-        print("\nTokenizations all done!")
-        self.train_set = train_dataset
-        self.val_set = val_dataset
-        return train_tokens, val_tokens, train_dataset, val_dataset
 
 
 ##############################
@@ -154,9 +161,9 @@ class CustomModel:
             target_modules = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
         
         config = LoraConfig(
-            r=8,
-            lora_alpha=32,
-            lora_dropout=0.05,
+            r=16,
+            lora_alpha=64,
+            lora_dropout=0.1,
             bias='none',
             target_modules=target_modules,
             task_type=TaskType.CAUSAL_LM
@@ -183,11 +190,15 @@ class CustomModel:
             weight_decay=L2,
             per_device_train_batch_size=batch_size,
             num_train_epochs=epochs,
+            label_names = ["labels"],
 
-            eval_steps=500,
+            eval_steps=250,
             eval_strategy="steps",
             per_device_eval_batch_size=batch_size,
-            
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
+
             save_steps=500,
             save_strategy="steps",
 
@@ -207,7 +218,8 @@ class CustomModel:
             args=training_arguments,
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
-            processing_class=self.tokenizer
+            processing_class=self.tokenizer,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]
         )
 
         print(f"[Training Arguments] and [Trainer] Generated! \n")
@@ -224,10 +236,19 @@ class ScriptGenerator:
         self.prompt = None
         self.generated_scripts = []
 
-    def create_prompt(self, characters, location="Central Perk", scenario="having coffee", seed_dialogue=None, continue_speaker=None):
+
+    def create_prompt(self, title, characters, location="Central Perk", scenario="having coffee", seed_dialogue=None, continue_speaker=None):
         assert len(characters) >= 2, "Please assign at least 2 charactors~"
 
-        prompt = f"[Scene: {location}, {', '.join(characters)} are {scenario}.]\n\n"
+        prompt = f"""
+        You are going to generate a new episode of the show *Friends*.
+        
+        The episode should include multiple scenes, natural conversations, character-specific humor, and a clear ending.
+        
+        Title: {title}
+        
+        [Scene: {location}, {', '.join(characters)} are {scenario}.]\n\n
+        """
 
         if seed_dialogue:
             for speaker, line in seed_dialogue.items():
@@ -241,20 +262,21 @@ class ScriptGenerator:
 
 
     # New Script Generator
-    def create_new_script(self, model, tokenizer, max_new_tokens=500, temperature=0.9, top_k=50, top_p=0.95):
+    def create_new_script(self, model, tokenizer, max_new_tokens=2048, temperature=0.9, top_k=50, top_p=0.95):
         model.eval()
         inputs = tokenizer(self.prompt, return_tensors="pt").to("cuda")
 
         with torch.no_grad():
             output = model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                repetition_penalty=1.2,
-                pad_token_id=tokenizer.eos_token_id
+                max_new_tokens = max_new_tokens,
+                do_sample = True,
+                temperature = temperature,
+                top_k = top_k,
+                top_p = top_p,
+                repetition_penalty = 1.2,
+                pad_token_id = tokenizer.eos_token_id,
+                eos_token_id = tokenizer.eos_token_id,
             )
 
         new_script = tokenizer.decode(output[0], skip_special_tokens=True)
@@ -262,12 +284,31 @@ class ScriptGenerator:
         return new_script
 
 
+    def pretty_print_script(self, script_str):
+        lines = script_str.strip().split("\n")
+
+        for line in lines:
+            line = line.strip()
+
+            if line.startswith("[Scene") or line.startswith("["):
+                print(line + "\n" + "-" * len(line))
+            elif ":" in line:
+                speaker, dialogue = line.split(":", 1)
+                print(f"{speaker.strip()}: {dialogue.strip()}")
+            elif line.startswith("(") and line.endswith(")"):
+                print(f"   {line}")
+            else:
+                print(line)
+
+
 ########################
 #   Model Evaluation   #
 ########################
+
 class CustomEvaluator:
     def __init__(self, trainer):
         self.trainer = trainer
+
 
     def perplexity(self):
         evaluate_results = self.trainer.evaluate()
@@ -282,9 +323,9 @@ class CustomEvaluator:
 
 def load_custom_model(enable_lora, path):
     if enable_lora==True:
-        config = LoraConfig.from_pretrained(path)
+        config = PeftConfig.from_pretrained(path)
         model = AutoModelForCausalLM.from_pretrained(config.base_model_name_or_path)
-        lora_model = LoraConfig.from_pretrained(model, path)
+        lora_model = PeftModel.from_pretrained(model, path)
     else:
         model = AutoModelForCausalLM.from_pretrained(path)
     
