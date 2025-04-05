@@ -139,7 +139,7 @@ class CustomModel:
             self.bitsbytes = self.bits_bytes_config()
             model = AutoModelForCausalLM.from_pretrained(self.model_name, quantization_config=self.bitsbytes)
         else:
-            moel = AutoModelForCausalLM.from_pretrained(self.model_name)
+            model = AutoModelForCausalLM.from_pretrained(self.model_name)
         
         if enable_lora == True:
             self.lora = self.lora_config()
@@ -161,8 +161,8 @@ class CustomModel:
             target_modules = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
         
         config = LoraConfig(
-            r=16,
-            lora_alpha=64,
+            r=8,
+            lora_alpha=32,
             lora_dropout=0.1,
             bias='none',
             target_modules=target_modules,
@@ -237,15 +237,13 @@ class ScriptGenerator:
         self.generated_scripts = []
 
 
-    def create_prompt(self, title, characters, location="Central Perk", scenario="having coffee", seed_dialogue=None, continue_speaker=None):
+    def create_prompt(self, characters, location="Central Perk", scenario="having coffee", seed_dialogue=None, continue_speaker=None):
         assert len(characters) >= 2, "Please assign at least 2 charactors~"
 
         prompt = f"""
         You are going to generate a new episode of the show *Friends*.
         
         The episode should include multiple scenes, natural conversations, character-specific humor, and a clear ending.
-        
-        Title: {title}
         
         [Scene: {location}, {', '.join(characters)} are {scenario}.]\n\n
         """
