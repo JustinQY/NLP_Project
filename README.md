@@ -1,5 +1,5 @@
 
-# 📝 TV Show Script Generation using LLaMA2 + LoRA + BitsAndBytes
+# 📝 TV Show Script Generation using LLaMA2 (LoRA, BitsAndBytes)
 
 ## 1. Introduction
 
